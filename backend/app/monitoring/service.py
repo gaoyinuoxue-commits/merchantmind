@@ -22,7 +22,9 @@ from app.models.material import Material
 from app.models.memory import MemoryConflict, MemoryItem
 from app.models.badcase import Feedback
 from app.models.performance import PerformanceDaily
+from app.models.merchant import Merchant
 from app.models.trace import TraceRun, TraceSpan
+from app.tools.metrics import margin_for_industry
 
 DEMO_LABEL = "Demo/Simulation Metrics"
 SYNTHETIC_BUSINESS_LABEL = "Synthetic Business Metrics"
@@ -212,7 +214,12 @@ class MonitoringService:
         recent_start = anchor - timedelta(days=6)
         previous_start = anchor - timedelta(days=13)
 
-        def totals(start, end) -> Tuple[float, float, int, int, int]:
+        merchant_industry = {
+            m.merchant_id: m.industry
+            for m in self.db.scalars(select(Merchant)).all()
+        }
+
+        def totals(start, end) -> Tuple[float, float, int, int, int, float]:
             rows = list(self.db.scalars(
                 select(PerformanceDaily).where(
                     PerformanceDaily.date >= start, PerformanceDaily.date <= end
@@ -224,10 +231,18 @@ class MonitoringService:
                 sum(r.clicks or 0 for r in rows),
                 sum(r.impressions or 0 for r in rows),
                 len(rows),
+                sum(
+                    (r.gmv or 0)
+                    * margin_for_industry(merchant_industry.get(r.merchant_id))
+                    for r in rows
+                ),
             )
 
         def unpack(rows):
-            return {"gmv": rows[0], "ad_spend": rows[1], "clicks": rows[2], "impressions": rows[3], "days": rows[4]}
+            return {
+                "gmv": rows[0], "ad_spend": rows[1], "clicks": rows[2],
+                "impressions": rows[3], "days": rows[4], "gross_profit": rows[5],
+            }
 
         recent = unpack(totals(recent_start, anchor))
         previous = unpack(totals(previous_start, recent_start - timedelta(days=1)))
@@ -235,8 +250,8 @@ class MonitoringService:
         def pct_change(new: float, old: float) -> Optional[float]:
             return round((new - old) / old * 100, 2) if old else None
 
-        roi_recent = recent["gmv"] / recent["ad_spend"] if recent["ad_spend"] else None
-        roi_previous = previous["gmv"] / previous["ad_spend"] if previous["ad_spend"] else None
+        roi_recent = recent["gross_profit"] / recent["ad_spend"] if recent["ad_spend"] else None
+        roi_previous = previous["gross_profit"] / previous["ad_spend"] if previous["ad_spend"] else None
         ctr_recent = recent["clicks"] / recent["impressions"] if recent["impressions"] else None
         ctr_previous = previous["clicks"] / previous["impressions"] if previous["impressions"] else None
         cpm_recent = recent["ad_spend"] / recent["impressions"] * 1000 if recent["impressions"] else None
