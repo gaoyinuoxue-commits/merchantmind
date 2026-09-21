@@ -146,3 +146,48 @@ def classify_intent(text: str) -> IntentResult:
         confidence=min(0.98, confidence),
         signals={"metrics": metrics, "domains": domains, "matched": matched[best]},
     )
+
+
+# --- Metric lookup vs diagnosis/strategy/benchmark disambiguation ----------
+# "现在 ROI 是多少 / 帮我查一下点击率" asks for a current value; it must not
+# be routed to the "why did it drop" diagnosis pipeline.
+
+# Explicit value-request cues only. Note that "怎么样/如何了" is deliberately
+# excluded: it asks for analysis/status rather than a bare number and must keep
+# the normal flow (memory recall + diagnosis), not the lookup shortcut.
+_LOOKUP_CUES = re.compile(
+    r"多少|几多|多大|多高"
+    r"|查一下|查一查|查下|查询|帮我查|帮忙查"
+    r"|看下|看看|看一下|看一看"
+)
+
+# Any of these means the user wants attribution, advice, a definition or an
+# industry benchmark rather than their own current number -> not a lookup.
+_NON_LOOKUP_CUES = re.compile(
+    r"为什么|为啥|为何|怎么会|原因|归因"
+    r"|是什么|什么意思|怎么算|口径|定义"
+    r"|怎么提升|如何提升|怎么提高|如何提高|怎么办"
+    r"|怎么优化|如何优化|怎么改善|如何改善"
+    r"|怎么才能|如何才能|要不要|该不该|应不应该"
+    r"|一般|通常|正常|标准|基准|平均|行业里"
+    r"|合适|应该.{0,3}多少|设.{0,3}多少|定.{0,3}多少"
+    r"|调.{0,3}多少|加.{0,3}多少|降.{0,3}多少"
+)
+
+_SPEND_HINT = re.compile(r"花费|消耗|花了|烧了|花钱|预算")
+
+
+def is_metric_lookup(text: str, signals: Dict[str, List[str]] = None) -> bool:
+    """True when the utterance asks for the merchant's own current metric.
+
+    Requires (a) a metric subject, (b) an explicit value-request cue, and
+    (c) no attribution/advice/definition/benchmark cue. Deliberately errs on
+    the side of False so ambiguous cases keep the original diagnosis flow.
+    """
+    signals = signals if signals is not None else extract_signals(text)
+    has_metric = bool(signals.get("metrics")) or bool(_SPEND_HINT.search(text))
+    if not has_metric:
+        return False
+    if _NON_LOOKUP_CUES.search(text):
+        return False
+    return bool(_LOOKUP_CUES.search(text))

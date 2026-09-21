@@ -8,10 +8,12 @@ from app.agent.intent import (
     INTENT_KNOWLEDGE,
     INTENT_PERFORMANCE,
     classify_intent,
+    is_metric_lookup,
 )
 from app.agent.orchestrator import AgentOrchestrator
 from app.agent.planner import build_plan
 from app.models import Conversation, Merchant, Message
+from app.models.performance import PerformanceDaily
 from app.services.conversation_service import ConversationService
 from app.knowledge.service import KnowledgeService
 from app.services.seed_service import SeedService
@@ -117,3 +119,49 @@ def test_agent_http_run_end_to_end(api_client, db, world) -> None:
         "/api/agent/run", json={"merchant_id": "NOPE", "message": "你好"}
     )
     assert missing.status_code == 404
+
+
+def test_is_metric_lookup_detects_value_requests() -> None:
+    assert is_metric_lookup("现在的ROI是多少")
+    assert is_metric_lookup("帮我查一下点击率")
+    assert is_metric_lookup("今天花了多少钱")
+    assert not is_metric_lookup("ROI 怎么样")
+    assert not is_metric_lookup("为什么 ROI 下滑")
+    assert not is_metric_lookup("怎么提升 ROI")
+    assert not is_metric_lookup("投产比一般多少")
+    assert not is_metric_lookup("年轻白领这个人群转化率怎么样")
+    assert not is_metric_lookup("今天天气怎么样")
+
+
+def test_orchestrator_metric_lookup_without_diagnosis(db, world) -> None:
+    ctx = AgentOrchestrator(db).run(world, "现在的 ROI 是多少")
+    assert ctx.metric_lookup is not None
+    assert ctx.diagnosis is None
+    latest = ctx.metric_lookup["latest"]
+    assert latest and latest["current"]["roi"] is not None
+    # Recomputed value matches the stored physical column for the anchor day.
+    anchor = latest["window"]["anchor_date"]
+    from datetime import date as date_type
+
+    row = db.scalar(
+        select(PerformanceDaily).where(
+            PerformanceDaily.merchant_id == world,
+            PerformanceDaily.date == date_type.fromisoformat(anchor),
+        )
+    )
+    assert abs(latest["current"]["roi"] - row.roi) < 0.02
+    tools = [o["tool"] for o in ctx.observations if o["tool"]]
+    assert "get_ad_performance" in tools
+
+
+def test_metric_lookup_http_returns_number(api_client, db, world) -> None:
+    resp = api_client.post(
+        "/api/agent/run",
+        json={"merchant_id": "M001", "message": "现在的ROI是多少"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "指标直查" in body["reply"]
+    assert "ROI =" in body["reply"]
+    assert "意图识别" not in body["reply"]
+    assert body["diagnosis"] is None

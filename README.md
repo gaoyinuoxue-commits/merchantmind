@@ -5,7 +5,7 @@
 > 实现从问题理解、Context Planning、经营诊断到 Action 执行与结果反馈的 Agent 闭环，
 > 并通过 **Trace、Evaluation、Badcase、Experiment** 持续优化 Agent 效果。
 
-**项目阶段：Phase 1–20 已全部完成（全量 117 个 pytest 通过 · E2E 冒烟 11/11 · Docker 一键起栈 · 已接入真实预训练深度模型 BGE，意图分类与知识检索的 embedding / 匹配方法均可插拔）**
+**项目阶段：Phase 1–20 已全部完成（全量 120 个 pytest 通过 · E2E 冒烟 11/11 · Docker 一键起栈 · 真实预训练深度模型 BGE，embedding / 向量匹配可插拔，并支持「指标直查 vs 归因诊断」）**
 
 MerchantMind 不是 Chatbot，也不是 RAG Demo，而是一个 **Business Diagnosis Agent**：
 
@@ -243,7 +243,12 @@ Agent：自研 Orchestrator（不强依赖 LangChain/LangGraph）  Observability
 
 三种策略之后统一再做五因子精排（`0.55 semantic + 0.15 industry + 0.15 keyword + 0.10 type + 0.05 freshness`）；`score_breakdown.strategy` 标注本次实际使用的策略。
 
-**⑤ 相关环境变量**
+**⑤ 指标直查 vs 归因诊断（问"是多少"不再答非所问）**
+
+- Agent 区分「取当前数值」与「分析下滑原因」：当问句是「现在 ROI 是多少 / 帮我查一下点击率 / 今天花了多少」这类**明确取数句式**时，只调用只读指标工具取最新当天与近 7 天数值并直接回答数字，不做记忆/知识 grounding 与归因；「为什么下滑 / 怎么提升 / 一般多少（问行业基准）/ X 怎么样（求分析）」仍走原诊断或咨询流程（保留记忆召回）。
+- ROI 全系统统一为**毛利口径**：`ROI = GMV × 毛利率 ÷ 广告花费`，毛利率按行业（女装/家居 0.30、美妆 0.45、食品 0.25、3C 0.18），**ROI < 1 即投放亏损**；该口径在合成生成、Simulator、数据库物理列与工具重算之间完全一致（修复了此前工具重算漏乘毛利率、导致顾问答案与商家中心对不上的问题）。
+
+**⑥ 相关环境变量**
 
 - `INTENT_CLASSIFIER_BACKEND=rule|ml|dnn|hybrid`
 - `KNOWLEDGE_EMBEDDING_PROVIDER=local|bge|openai`
@@ -378,8 +383,8 @@ python scripts/e2e_smoke.py http://localhost:8000     # 11/11 PASS（含诊断�
 - 20 个 Phase 已全部完成：基础设施、19+ 张业务表与可逆 Alembic 迁移链（单 head `2eed261ea26`）、
   合成世界、Simulator、对话、记忆治理/召回、知识 RAG（58 条）、工具、Planner/Orchestrator、
   Hooks/双假因/Action Loop、Trace、54 case 评测、Badcase/反馈、A/B 实验、三层监控、15 页前端、
-  真实预训练 BGE 深度模型与可插拔语义层（§26.1）、
-  Docker 一键栈；全量 117 个 pytest 绿灯，容器内空库重放迁移链 + seed + E2E 11/11 已验证。
+  真实预训练 BGE 深度模型、可插拔语义层与指标直查（§26.1）、
+  Docker 一键栈；全量 120 个 pytest 绿灯，容器内空库重放迁移链 + seed + E2E 11/11 已验证。
 - 语义层已使用真实预训练深度模型（本地 BGE-small-zh ONNX，见 §26.1）：意图 dnn 后端为“冻结 BGE + MLP 头”的迁移学习，
   知识 embedding 与向量匹配方法均可插拔（local/bge/openai × vector/bm25/hybrid）；默认仍走 local 哈希 + 规则意图以保证评测可复现。
 - 生成式 LLM 仍为可选项：未配置在线 LLM 时，动作解析、规划、证据归因为确定性规则，评测评委为 Rule/Heuristic 结构代理，
@@ -403,6 +408,6 @@ Phase 1 基础设施 → 2 Schema → 3 Synthetic World → 4 Simulator → 5 Co
 11 Hooks/Uncertainty → 12 Diagnosis/Evidence → 13 Action/Loop → 14 Trace →
 15 Evaluation → 16 Badcase/Feedback → 17 Experiment → 18 Monitoring/KPI → 19 完整前端 → 20 集成验收。
 
-**状态：Phase 1–20 全部完成 ✅**（117 个 pytest 全绿、前端 tsc/next build 通过、Docker 三容器空库迁移链 + seed 自举、E2E 11/11；已接入真实预训练 BGE 深度模型，意图与知识检索的 embedding/匹配均可插拔，§26.1）
+**状态：Phase 1–20 全部完成 ✅**（120 个 pytest 全绿、前端 tsc/next build 通过、Docker 三容器空库迁移链 + seed 自举、E2E 11/11；真实预训练 BGE 深度模型，embedding/匹配可插拔，支持指标直查，§26.1）
 
 **每个 Phase 完成后运行代码、测试、检查数据库/API/前端，修复后才进入下一 Phase。**

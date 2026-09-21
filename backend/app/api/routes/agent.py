@@ -17,9 +17,45 @@ router = APIRouter(prefix="/agent", tags=["agent"])
 GREETING = "你好，我是 MerchantMind 经营诊断助手。可以问我「为什么最近 ROI 下滑」「要不要加预算」这类经营问题。"
 
 
+def _fmt_pct(value) -> str:
+    if value is None:
+        return "—"
+    return f"{value:+.1f}%"
+
+
+def _build_metric_reply(ctx: RunContext) -> str:
+    payload = ctx.metric_lookup or {}
+    latest = payload.get("latest") or {}
+    week7 = payload.get("week7") or {}
+    current = latest.get("current") or {}
+    delta = latest.get("delta_pct") or {}
+    week_current = week7.get("current") or {}
+    anchor = (latest.get("window", {}) or {}).get("anchor_date")
+
+    lines = ["【指标直查】"]
+    if current:
+        lines.append(f"截至 {anchor}（最新当天）：")
+        lines.append(f"· ROI = {current.get('roi'):.2f}（日环比 {_fmt_pct(delta.get('roi'))}）")
+        ctr = current.get("ctr")
+        if ctr is not None:
+            lines.append(f"· CTR = {ctr * 100:.2f}%　CPM = {current.get('cpm'):.2f} 元")
+        else:
+            lines.append(f"· CPM = {current.get('cpm'):.2f} 元")
+        lines.append(
+            f"· GMV = {current.get('gmv'):.0f} 元　广告花费 = {current.get('ad_spend'):.0f} 元"
+        )
+    if week_current:
+        lines.append(f"近 7 天整体 ROI = {week_current.get('roi'):.2f}")
+    lines.append("数据来源：SYNTHETIC 合成商家世界，指标均由真实入库数据计算。")
+    lines.append("需要分析原因的话，可以问我「为什么最近 ROI 下滑」。")
+    return "\n".join(lines)
+
+
 def _build_reply(ctx: RunContext, actions: list) -> str:
     if ctx.intent["intent"] == INTENT_GREETING:
         return GREETING
+    if ctx.metric_lookup:
+        return _build_metric_reply(ctx)
     if ctx.needs_clarification and ctx.clarification_question:
         return f"需要先确认一下：{ctx.clarification_question}"
 

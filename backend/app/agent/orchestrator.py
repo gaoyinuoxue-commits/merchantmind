@@ -12,7 +12,7 @@ from typing import Any, Callable, Dict, List, Optional
 from sqlalchemy.orm import Session
 
 from app.agent.diagnosis import diagnose, referenced_slugs
-from app.agent.intent import INTENT_GREETING, INTENT_KNOWLEDGE
+from app.agent.intent import INTENT_GREETING, INTENT_KNOWLEDGE, is_metric_lookup
 from app.agent.intent_ml import classify_with_backend
 from app.agent.planner import build_plan
 from app.hooks.engine import PostHook, PreHook, ToolHook
@@ -81,6 +81,7 @@ class RunContext:
     clarification_question: Optional[str] = None
     quality_retried: bool = False
     quality_decision: Optional[str] = None
+    metric_lookup: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -97,6 +98,7 @@ class RunContext:
             "clarification_question": self.clarification_question,
             "quality_retried": self.quality_retried,
             "quality_decision": self.quality_decision,
+            "metric_lookup": self.metric_lookup,
             "label": "SYNTHETIC",
         }
 
@@ -183,6 +185,12 @@ class AgentOrchestrator:
         if intent.intent == INTENT_GREETING:
             return ctx
 
+        # "ROI 是多少 / 点击率怎么样" -> fetch current numbers only, no
+        # memory/knowledge grounding and no attribution diagnosis.
+        if is_metric_lookup(query, intent.signals):
+            self._run_metric_lookup(ctx)
+            return ctx
+
         ctx.memories = MemoryRetrievalService(self.db).recall(
             merchant_id,
             query,
@@ -255,6 +263,47 @@ class AgentOrchestrator:
             ctx.knowledge.extend(grounded)
             report = diagnose(ctx)
         return report
+
+    def _run_metric_lookup(self, ctx: RunContext) -> None:
+        """Read-only current-value lookup: shop profile + latest day + 7-day."""
+        merchant_id = ctx.merchant_id
+        steps = [
+            {
+                "kind": "tool",
+                "tool": "get_shop_profile",
+                "arguments": {"merchant_id": merchant_id},
+                "reason": "确认商家与当前模拟日期",
+            },
+            {
+                "kind": "tool",
+                "tool": "get_ad_performance",
+                "arguments": {"merchant_id": merchant_id, "days": 1},
+                "reason": "取最新当天指标与日环比",
+            },
+            {
+                "kind": "tool",
+                "tool": "get_ad_performance",
+                "arguments": {"merchant_id": merchant_id, "days": 7},
+                "reason": "取近 7 天整体指标",
+            },
+        ]
+        self._execute_steps(ctx, merchant_id, ctx.query, steps)
+        ctx.metric_lookup = {
+            "latest": self._find_tool_data(ctx, "get_ad_performance", 1),
+            "week7": self._find_tool_data(ctx, "get_ad_performance", 7),
+        }
+
+    @staticmethod
+    def _find_tool_data(
+        ctx: RunContext, tool: str, days: int
+    ) -> Optional[Dict[str, Any]]:
+        for observation in ctx.observations:
+            if observation.get("tool") != tool or not observation.get("success"):
+                continue
+            window = (observation.get("data", {}).get("window", {}) or {}).get("days")
+            if window == days:
+                return observation.get("data")
+        return None
 
     def _execute_steps(
         self, ctx: RunContext, merchant_id: str, query: str, steps: List[Dict[str, Any]]
