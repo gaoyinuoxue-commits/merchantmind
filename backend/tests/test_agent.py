@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+import json
+from types import SimpleNamespace
+
 import pytest
 
+import app.api.routes.agent as agent_routes
+import app.llm.chat as chat_module
+from app.llm.chat import LLMError
 from app.agent.intent import (
     INTENT_ACTION,
     INTENT_GREETING,
@@ -10,7 +16,7 @@ from app.agent.intent import (
     classify_intent,
     is_metric_lookup,
 )
-from app.agent.orchestrator import AgentOrchestrator
+from app.agent.orchestrator import AgentOrchestrator, RunContext
 from app.agent.planner import build_plan
 from app.models import Conversation, Merchant, Message
 from app.models.performance import PerformanceDaily
@@ -165,3 +171,99 @@ def test_metric_lookup_http_returns_number(api_client, db, world) -> None:
     assert "ROI =" in body["reply"]
     assert "意图识别" not in body["reply"]
     assert body["diagnosis"] is None
+
+
+# --- real generative LLM (OpenAI-compatible, e.g. DeepSeek) -----------------
+
+
+class _FakeHTTPResponse:
+    def __init__(self, payload) -> None:
+        self._payload = payload
+
+    def read(self):
+        return json.dumps(self._payload, ensure_ascii=False).encode("utf-8")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
+def _llm_settings(enabled: bool = True) -> SimpleNamespace:
+    return SimpleNamespace(
+        llm_provider="deepseek" if enabled else "local",
+        llm_base_url="https://api.deepseek.com/v1" if enabled else "",
+        llm_api_key="sk-test" if enabled else "",
+        llm_model="deepseek-chat",
+    )
+
+
+def test_llm_enabled_gate(monkeypatch) -> None:
+    monkeypatch.setattr(chat_module, "get_settings", lambda: _llm_settings(False))
+    assert chat_module.is_llm_enabled() is False
+    monkeypatch.setattr(chat_module, "get_settings", lambda: _llm_settings(True))
+    assert chat_module.is_llm_enabled() is True
+
+
+def test_chat_client_openai_compatible(monkeypatch) -> None:
+    monkeypatch.setattr(chat_module, "get_settings", lambda: _llm_settings(True))
+    captured = {}
+
+    def fake_urlopen(request, timeout=0):
+        captured["url"] = request.full_url
+        captured["headers"] = request.headers
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        return _FakeHTTPResponse(
+            {"choices": [{"message": {"content": "近7天ROI持续下行，从3.1降到2.7。"}}]}
+        )
+
+    monkeypatch.setattr(chat_module.urllib.request, "urlopen", fake_urlopen)
+    reply = chat_module.chat([{"role": "user", "content": "ROI趋势"}])
+    assert "持续下行" in reply
+    assert captured["url"] == "https://api.deepseek.com/v1/chat/completions"
+    assert captured["body"]["model"] == "deepseek-chat"
+    assert captured["headers"]["Authorization"] == "Bearer sk-test"
+
+
+def _llm_demo_ctx() -> RunContext:
+    return RunContext(
+        merchant_id="M001",
+        query="最近ROI趋势怎么样",
+        intent={"intent": "performance_diagnosis", "confidence": 0.9},
+        memories=[{"type": "preference", "content": "主要客户是年轻白领"}],
+        knowledge=[{"title": "ROI 投入产出比", "content": "GMV×毛利率÷花费"}],
+        observations=[
+            {
+                "tool": "get_ad_performance",
+                "success": True,
+                "data": {"current": {"roi": 2.7}, "window": {"days": 7}},
+            }
+        ],
+    )
+
+
+def test_llm_context_packs_evidence() -> None:
+    brief = agent_routes._llm_context(_llm_demo_ctx())
+    assert "年轻白领" in brief
+    assert "ROI 投入产出比" in brief
+    assert "get_ad_performance" in brief
+
+
+def test_build_reply_uses_llm_when_enabled(monkeypatch) -> None:
+    monkeypatch.setattr(agent_routes, "is_llm_enabled", lambda: True)
+    monkeypatch.setattr(
+        agent_routes, "llm_chat", lambda messages, **kw: "大模型：ROI 最近在下滑。"
+    )
+    assert agent_routes._build_reply(_llm_demo_ctx(), []) == "大模型：ROI 最近在下滑。"
+
+
+def test_build_reply_falls_back_when_llm_errors(monkeypatch) -> None:
+    monkeypatch.setattr(agent_routes, "is_llm_enabled", lambda: True)
+
+    def _raise(messages, **kw):
+        raise LLMError("boom")
+
+    monkeypatch.setattr(agent_routes, "llm_chat", _raise)
+    reply = agent_routes._build_reply(_llm_demo_ctx(), [])
+    assert "意图识别" in reply

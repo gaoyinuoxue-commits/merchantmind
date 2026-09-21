@@ -25,6 +25,11 @@ services:
       APP_ENV: docker
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-merchantmind}:${POSTGRES_PASSWORD:-merchantmind}@db:5432/${POSTGRES_DB:-merchantmind}
       BACKEND_CORS_ORIGINS: http://localhost:3000
+      # Optional generative LLM (OpenAI-compatible). Defaults disabled.
+      LLM_PROVIDER: ${LLM_PROVIDER:-local}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-local-deterministic}
     ports:
       - "8000:8000"
     depends_on:

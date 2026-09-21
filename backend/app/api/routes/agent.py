@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -7,6 +9,7 @@ from app.agent.actions import execute_loop, parse_requested_action, propose_for_
 from app.agent.intent import INTENT_ACTION, INTENT_GREETING, INTENT_KNOWLEDGE
 from app.agent.orchestrator import AgentOrchestrator, RunContext
 from app.db.session import get_db
+from app.llm.chat import LLMError, chat as llm_chat, is_llm_enabled
 from app.models.merchant import Merchant
 from app.schemas.agent import ActionExecuteIn, AgentRunIn, AgentRunOut
 from app.services.conversation_service import ConversationService
@@ -51,13 +54,99 @@ def _build_metric_reply(ctx: RunContext) -> str:
     return "\n".join(lines)
 
 
+def _compact(value, limit: int = 600) -> str:
+    try:
+        text = json.dumps(value, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        text = str(value)
+    return text if len(text) <= limit else text[:limit] + " …(截断)"
+
+
+def _llm_context(ctx: RunContext) -> str:
+    """Serialize everything the Agent grounded into a compact evidence brief."""
+    blocks = []
+
+    if ctx.metric_lookup:
+        blocks.append("【指标直查数据】" + _compact(ctx.metric_lookup, 800))
+
+    for obs in ctx.observations:
+        tool = obs.get("tool")
+        if tool and obs.get("success"):
+            blocks.append(f"【工具 {tool}】" + _compact(obs.get("data"), 700))
+
+    if ctx.memories:
+        lines = [f"- [{m.get('type')}] {m.get('content')}" for m in ctx.memories[:5]]
+        blocks.append("【商家记忆】\n" + "\n".join(lines))
+
+    if ctx.knowledge:
+        lines = [
+            f"- 《{k.get('title')}》{str(k.get('content', ''))[:180]}"
+            for k in ctx.knowledge[:16]
+        ]
+        blocks.append("【行业知识】\n" + "\n".join(lines))
+
+    if ctx.diagnosis:
+        diag = ctx.diagnosis
+        parts = []
+        primary = diag.get("primary_cause")
+        if primary:
+            parts.append(
+                f"主要归因：{primary.get('title')}（置信度 {primary.get('confidence')}），"
+                f"{primary.get('explanation')}"
+            )
+        alternative = diag.get("alternative_cause")
+        if alternative:
+            parts.append(f"备择假设：{alternative.get('title')}（{alternative.get('confidence')}）")
+        if diag.get("confidence_note"):
+            parts.append(diag["confidence_note"])
+        blocks.append("【系统诊断参考】\n" + "\n".join(parts))
+
+    return "\n".join(blocks) if blocks else "（本次未取到额外证据）"
+
+
+_LLM_SYSTEM_PROMPT = (
+    "你是 MerchantMind，一位资深的电商商家 AI 经营顾问。请严格依据系统提供的"
+    "【真实数据与证据】回答商家的问题。要求：\n"
+    "1. 直接回答商家真正问的内容：问数值就给数值，问趋势/走势就描述近期方向、幅度和拐点，"
+    "问原因才做归因，问建议才给策略；不要答非所问，不要罗列与问题无关的内容。\n"
+    "2. 只能使用提供的证据，所有数字必须与证据完全一致，禁止编造证据之外的数据或结论。\n"
+    "3. 用简体中文，先给结论再简要解释，条理清晰，整体控制在 250 字以内。\n"
+    "4. 商家没有要求执行动作时，不要强行罗列操作；证据不足时，明确说明还缺什么信息。"
+)
+
+
+def _build_llm_reply(ctx: RunContext):
+    """Return a real-LLM answer, or None when the model is unavailable/fails."""
+    if not is_llm_enabled():
+        return None
+    messages = [
+        {"role": "system", "content": _LLM_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": (
+                f"商家问题：{ctx.query}\n\n已收集的证据如下：\n{_llm_context(ctx)}\n\n"
+                "请针对商家的问题作答。"
+            ),
+        },
+    ]
+    try:
+        return llm_chat(messages, temperature=0.3, max_tokens=900) or None
+    except LLMError:
+        return None
+
+
 def _build_reply(ctx: RunContext, actions: list) -> str:
     if ctx.intent["intent"] == INTENT_GREETING:
         return GREETING
-    if ctx.metric_lookup:
-        return _build_metric_reply(ctx)
     if ctx.needs_clarification and ctx.clarification_question:
         return f"需要先确认一下：{ctx.clarification_question}"
+
+    llm_reply = _build_llm_reply(ctx)
+    if llm_reply:
+        return llm_reply
+
+    if ctx.metric_lookup:
+        return _build_metric_reply(ctx)
 
     lines = [f"【意图识别】{ctx.intent['intent']}（置信度 {ctx.intent['confidence']}）"]
 
