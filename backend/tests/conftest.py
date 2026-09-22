@@ -6,6 +6,12 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+# Unit tests must be deterministic and never depend on a real external LLM,
+# network, API key, or billing balance. This env var takes precedence over
+# the local .env file. Tests that exercise LLM behavior monkeypatch the chat
+# layer explicitly, so they are unaffected by this default.
+os.environ["LLM_PROVIDER"] = "local"
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
