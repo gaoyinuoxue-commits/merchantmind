@@ -459,9 +459,11 @@ docker compose exec backend PYTHONPATH=/app python scripts/seed_database.py --fu
 > `colima start --runtime docker --vm-type vz --mount none` 后照常 `docker compose up --build`。
 > 若宿主机 5432 已被占用，在本地 `.env` 设置 `POSTGRES_PORT=5433`（仅影响宿主机映射端口）。
 
-## 30. Demo
+## 30. 本地预览与功能一览（Local Preview）
 
-打开 <http://localhost:3000>，左侧 15 个页面全部对接真实 FastAPI（React Query + Recharts，无 Mock）：
+> 本项目当前**未托管公网在线 Demo**。请先按 [§28 本地启动](#28-本地启动无-docker) 或 [§29 Docker 启动](#29-docker-启动) 在本机把服务跑起来，再于浏览器访问本地地址 `http://localhost:3000` 预览。下面的功能一览用于说明启动后可看到的内容，该地址仅在本机有效、并非公网网址。
+
+启动后，左侧 15 个页面全部对接真实 FastAPI（React Query + Recharts，无 Mock）：
 
 - **AI 经营顾问**：选"花间女装旗舰店（M001）"提问"为什么最近 ROI 一直下滑，帮我诊断"，可看到
   意图 → 记忆/知识召回 → 双假设归因（含证据与 quality_score）→ 动作建议 → 人类确认 → 执行后推进世界再观察的完整 Loop，
