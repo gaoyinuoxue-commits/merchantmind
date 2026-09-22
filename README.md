@@ -25,7 +25,7 @@ Observe → Think → Act → Observe Again
 16. [Hook](#16-hook) 17. [Uncertainty](#17-uncertainty) 18. [Action](#18-action) 19. [Agent Loop](#19-agent-loop)
 20. [Trace](#20-trace) 21. [Evaluation](#21-evaluation) 22. [Badcase](#22-badcase) 23. [Experiment](#23-experiment)
 24. [Monitoring](#24-monitoring) 25. [Business KPI](#25-business-kpi) 26. [技术架构](#26-技术架构) 27. [项目结构](#27-项目结构)
-28. [本地启动（无 Docker）](#28-本地启动无-docker) 29. [Docker 启动](#29-docker-启动) 30. [Demo](#30-demo)
+28. [本地启动（无 Docker）](#28-本地启动无-docker) 29. [Docker 启动](#29-docker-启动) 30. [本地预览与功能一览（Local Preview）](#30-本地预览与功能一览local-preview)
 31. [当前局限](#31-当前局限) 32. [未来真实业务落地方案](#32-未来真实业务落地方案)
 
 ---
