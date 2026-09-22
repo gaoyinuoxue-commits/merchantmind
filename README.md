@@ -263,6 +263,104 @@ Agent：自研 Orchestrator（不强依赖 LangChain/LangGraph）  Observability
 
 **边界**：预训练编码器与生成式 LLM 均为真实模型，但未引入 torch/transformers 等重依赖（BGE 仅 ONNX 运行时，LLM 走 OpenAI 兼容 HTTP）；工具选择与证据归因仍为确定性规划，确保数字真实可追溯；默认 provider=local + rule 保证现网与评测零回归。
 
+### 26.2 运行时：一次请求的完整生命周期（Trace 逐步拆解）
+
+Trace 页里看到的 `intent / memory / planner / tool_call / knowledge / diagnosis` **不是各自独立的 HTTP 接口，而是一次 `POST /api/agent/run` 请求内部顺序执行的 span**。一次典型的「性能诊断」会经过三大段共 11 步：
+
+```text
+【听懂问题】
+ 1 intent        意图识别 + 信号抽取（classify_with_backend）
+ 2 memory        记忆抽取：本句有没有值得长期记住的事实/偏好（有则先写入）
+ 3 memory        记忆召回：该商家历史记忆按多维打分取最相关几条
+ 4 planner       决策规划：按意图与信号动态生成"有序取证清单"
+【全面取证】（按 plan 执行，结果统一进 ctx.observations）
+ 5 get_shop_profile            店铺画像：行业/阶段/当前日期（背景基线）
+ 6 get_ad_performance          近 7 天 ROI/CTR/CPM 及环比（定位异常）
+ 7 get_recent_business_events  近期调预算/上新/活动（解释拐点触发）
+ 8 get_material_performance    素材状态/疲劳度（判断是否素材问题）
+ 9 get_historical_cases        相似历史案例（类比佐证）
+10 knowledge                   行业知识检索（规则与最佳实践）
+【证据归因】
+11 diagnosis      多候选根因各自按证据打分排序，输出主因（如 budget_cpm_spiral）
+        ↓
+   归因 + 全部证据打包交给生成式 LLM 组织成对题的自然语言回答（见 §26.1 ⑥）
+```
+
+取证清单**不是写死的**：Planner 依据信号动态增减（涉及素材/CTR 才查素材，涉及商品/CVR 才查商品）。同时 `run()` 中还有 3 条**提前返回分支**，保证不同问法走不同路径：
+
+- 意图置信度过低 → PreHook 触发澄清，直接返回；
+- 打招呼 → 直接返回；
+- 命中「指标直查」（如"ROI 是多少"）→ 只取店铺画像 + 当天(days=1) + 近 7 天(days=7)，直接报数字，**不做记忆/知识 grounding 与归因**（见 §26.1 ⑤）。
+
+归因后 PostHook 还会做质量质检：`quality_score` 过低则**自动补查再判一次**（最多 1 次）；核心工具取不到数据则触发澄清。这是 Agent 的自我纠错环节。
+
+### 26.3 关键数据结构 IntentResult 与证据流向
+
+所有意图后端（rule/ml/dnn/hybrid）输出统一为 `IntentResult`（`backend/app/agent/intent.py`）：
+
+```python
+@dataclass
+class IntentResult:
+    intent: str                              # 5 个意图标签之一
+    confidence: float                        # 置信度 0~1
+    signals: Dict[str, List[str]]            # metrics / domains 结构化信号
+
+    def to_dict(self):                       # 落库/返回 JSON（置信度 round 4 位）
+        return {"intent": self.intent,
+                "confidence": round(self.confidence, 4),
+                "signals": self.signals}
+```
+
+关键设计：**模型只负责判断意图类别，而"涉及哪个指标(roi/ctr…)、哪个业务域(素材/预算…)"由确定性规则抽取**（`extract_signals`），为后续工具编排提供可靠的细粒度参数。
+
+Agent 取到的数据有 **4 个去向**：
+
+| 数据 | 去向 | 作用 |
+|---|---|---|
+| 工具数据 | ① 归因引擎 `diagnose()` | 当证据，先算出**客观中立**的根因（不用 LLM，数字不被润色带偏） |
+| 工具+记忆+知识+诊断 | ② 生成式 LLM | 打包成「证据简报」，让 LLM **严格基于证据**、针对真实问题作答（Grounding） |
+| 记忆/知识/观察 | ③ HTTP 响应 → 前端 | 渲染「召回记忆 N 条 / 引用知识 N 条 / 调用工具 N 个」证据卡，可追溯 |
+| 整套上下文 | ④ Trace 落库 | 事后可回看每一步输入输出与耗时，便于排查 Badcase |
+
+### 26.4 模型分工：规则 / 本地小模型 / 云端 DeepSeek
+
+系统里有三类"AI"，**本地小模型不是 DeepSeek**，分工明确：
+
+| | 规则 | 本地小模型 **BGE** | 云端 **DeepSeek** |
+|---|---|---|---|
+| 本质 | 关键词 if 判断 | 开源预训练中文编码器（小版 BERT，约 24MB） | 生成式大模型（GPT 类） |
+| 运行位置 | 本地进程 | **本地 / 容器内**，ONNX Runtime CPU 推理 | 远程服务器，HTTP 调用 |
+| 成本 / 速度 | 免费 / 毫秒 | **免费 / 毫秒** | 按次收费 / 2–4 秒 |
+| 职责 | 意图兜底、信号抽取 | 把句子变成向量 → 语义检索、意图 DNN 头 | **理解问题并生成最终自然语言回答** |
+
+一句话：**BGE 管"听懂（语义）"，DeepSeek 管"表达（生成）"**。另有更轻的 `ml`（TF-IDF + softmax 逻辑回归）作为意图基线之一。
+
+**数据库**：PostgreSQL 16 + pgvector。本地开发默认 `localhost:5432`；Docker 栈映射在宿主 `localhost:5433`；账户/库名均为 `merchantmind / merchantmind`，向量与业务数据同库存储。
+
+### 26.5 设计取舍：为什么意图识别不直接交给生成式大模型
+
+让 LLM 做意图识别通常也准，但这是**有意的工程取舍**（类似"让专家医生站门口做分诊"不划算）：
+
+1. **慢**：意图是第一步，LLM 一次 2–4 秒，规则/小模型只要 1–2 毫秒；
+2. **贵**：意图与生成各调一次，成本翻倍，而意图本地可零成本完成；
+3. **不稳、难复现**：LLM 有随机性，意图一旦飘移，后续整条分支都乱；本地结果固定才能支撑 125 个稳定测试；
+4. **依赖网络/Key**：断网或欠费时若连"听懂"都做不到，系统直接瘫痪；本地意图保证任何时候可用；
+5. **需要可靠结构化参数**：下游要的是确定的"指标 + 业务域"字段，规则抽取可校验，LLM 自然语言还需再解析。
+
+> 注意：意图 DNN 后端用的 BGE 本身也是预训练语言模型，只是"编码器"而非"生成式"模型。Function Calling 让 LLM "懂意图+选工具+填参数"一步完成是另一主流架构，更灵活但同样有上述代价；实践中常**混用**——简单高频走本地，拿不准的疑难句再升级给 LLM。
+
+### 26.6 记忆召回 vs 知识库召回：机制并不相同
+
+两者都叫"召回"，语义部分底层都用**余弦相似度 + HNSW 索引**，但向量、打分与可选项不同：
+
+| 对比 | 记忆召回 | 知识库召回 |
+|---|---|---|
+| 向量 | **固定本地哈希 256 维** | BGE 512 维 或 本地 256 维（看 provider） |
+| 打分 | **4 因素加权**：`0.35 语义 + 0.25 时效 + 0.20 重要性 + 0.20 词面` | 策略分发：`vector（纯余弦）/ bm25（纯词法）/ hybrid（RRF 融合）`，之后统一五因子精排 |
+| 语义占比 | 仅 35% | vector 模式下 100% |
+| 候选范围 | 该商家 + active | 全平台 + verified |
+| 可切换 | 否（写死） | 是（环境变量切换） |
+
 ## 27. 项目结构
 
 ```text
